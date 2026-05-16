@@ -32,7 +32,7 @@
 import { existsSync, statSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync } from "fs";
 import { join, dirname } from "path";
 import { execSync, spawnSync } from "child_process";
-import { homedir } from "os";
+import { homedir, hostname } from "os";
 import { createHash } from "crypto";
 
 import "../lib/conductor-env-shim";
@@ -161,30 +161,35 @@ function originUrl(): string | null {
 }
 
 /**
- * Derive a worktree-aware source id for the cwd code corpus.
+ * Derive a host- and worktree-aware source id for the cwd code corpus.
  *
- * Pattern: `gstack-code-<slug>-<pathhash8>` where slug comes from origin
- * (org/repo) and pathhash8 is the first 8 hex chars of sha1(absolute repo
- * path). The pathhash8 is what makes Conductor worktrees of the same repo
- * coexist as separate sources in the same gbrain DB instead of stomping on
- * each other.
+ * Pattern: `gstack-code-<slug>-<hostpathhash8>` where slug comes from origin
+ * (org/repo) and hostpathhash8 is the first 8 hex chars of
+ * sha1(`${hostname}::${absolute repo path}`). Folding hostname into the hash
+ * keeps Conductor worktrees of the same repo as distinct sources on one host
+ * AND keeps two machines that share an absolute layout (e.g. chezmoi-managed
+ * home dirs against a federated brain) from colliding on each other.
  *
  * Falls back to the repo basename when there is no origin (local repo).
+ *
+ * `GSTACK_HOSTNAME` env override is honored for deterministic tests; in
+ * production paths it is unset and `os.hostname()` is used.
  *
  * gbrain enforces source ids to be 1-32 lowercase alnum chars with
  * optional interior hyphens. `constrainSourceId` handles the 32-char cap
  * with a hashed-tail fallback when the combined slug exceeds budget.
  */
 function deriveCodeSourceId(repoPath: string): string {
-  const pathHash = createHash("sha1").update(repoPath).digest("hex").slice(0, 8);
+  const host = process.env.GSTACK_HOSTNAME || hostname();
+  const hostPathHash = createHash("sha1").update(`${host}::${repoPath}`).digest("hex").slice(0, 8);
   const remote = canonicalizeRemote(originUrl());
   if (remote) {
     const segs = remote.split("/").filter(Boolean);
     const slugSource = segs.slice(-2).join("-");
-    return constrainSourceId("gstack-code", `${slugSource}-${pathHash}`);
+    return constrainSourceId("gstack-code", `${slugSource}-${hostPathHash}`);
   }
   const base = repoPath.split("/").pop() || "repo";
-  return constrainSourceId("gstack-code", `${base}-${pathHash}`);
+  return constrainSourceId("gstack-code", `${base}-${hostPathHash}`);
 }
 
 /**
@@ -206,6 +211,172 @@ function deriveLegacyCodeSourceId(repoPath: string): string {
   }
   const base = repoPath.split("/").pop() || "repo";
   return constrainSourceId("gstack-code", base);
+}
+
+/**
+ * Pre-#1468 path-only-hash source id, kept for hostname-fold migration only.
+ *
+ * Before the hostname fold, `deriveCodeSourceId` hashed only the absolute
+ * repo path: `gstack-code-<slug>-<sha1(path).slice(0,8)>`. After #1468 the
+ * hash key is `${hostname}::${path}`, so every existing user's brain has a
+ * legacy id that no longer matches what `deriveCodeSourceId` produces. We
+ * detect this form once, attempt rename-in-place if the gbrain CLI supports
+ * `sources rename`, and otherwise clean up after the new source successfully
+ * syncs. Distinct from `deriveLegacyCodeSourceId` (pre-pathhash v1.x form);
+ * both probes run.
+ */
+export function derivePathOnlyHashLegacyId(repoPath: string): string {
+  const pathHash = createHash("sha1").update(repoPath).digest("hex").slice(0, 8);
+  const remote = canonicalizeRemote(originUrl());
+  if (remote) {
+    const segs = remote.split("/").filter(Boolean);
+    const slugSource = segs.slice(-2).join("-");
+    return constrainSourceId("gstack-code", `${slugSource}-${pathHash}`);
+  }
+  const base = repoPath.split("/").pop() || "repo";
+  return constrainSourceId("gstack-code", `${base}-${pathHash}`);
+}
+
+/**
+ * Feature-check whether the installed gbrain CLI ships `sources rename <old> <new>`.
+ *
+ * Per the v1.40.0.0 design review: probing `gbrain sources rename --help` and
+ * matching for the exact argument shape catches the case where gbrain's
+ * `sources` parent help mentions a `rename` subcommand but the CLI doesn't
+ * accept the `<old> <new>` form (or vice versa). Cached for the lifetime
+ * of the process. As of gbrain 0.35.0.0 this command does not exist, so the
+ * function returns false and the migration path falls back to register-new
+ * + sync-OK + remove-old.
+ */
+let _gbrainSupportsRenameCache: boolean | null = null;
+export function _resetGbrainSupportsRenameCache(): void {
+  _gbrainSupportsRenameCache = null;
+}
+function gbrainSupportsSourcesRename(env?: NodeJS.ProcessEnv): boolean {
+  if (_gbrainSupportsRenameCache !== null) return _gbrainSupportsRenameCache;
+  try {
+    const r = spawnSync("gbrain", ["sources", "rename", "--help"], {
+      encoding: "utf-8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: env || process.env,
+    });
+    const out = `${r.stdout || ""}\n${r.stderr || ""}`;
+    // Match the exact argument shape: `rename <old> <new>` (with literal
+    // angle brackets in usage strings) or `rename OLD NEW`.
+    const exact = /sources\s+rename\s+<old>\s+<new>/i.test(out)
+      || /sources\s+rename\s+OLD\s+NEW/.test(out)
+      || /sources\s+rename\s+<oldId>\s+<newId>/i.test(out);
+    _gbrainSupportsRenameCache = exact && r.status === 0;
+  } catch {
+    _gbrainSupportsRenameCache = false;
+  }
+  return _gbrainSupportsRenameCache;
+}
+
+/**
+ * Look up a source's `local_path` from `gbrain sources list --json`.
+ * Returns null when the source is absent or the listing fails.
+ *
+ * `env` is the environment passed to the spawned `gbrain` process; defaults
+ * to `process.env`. Tests inject a PATH that points at a gbrain shim so the
+ * helper can be exercised without a real gbrain CLI.
+ */
+export function sourceLocalPath(sourceId: string, env?: NodeJS.ProcessEnv): string | null {
+  try {
+    const r = spawnSync("gbrain", ["sources", "list", "--json"], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: env || process.env,
+    });
+    if (r.status !== 0) return null;
+    const list = JSON.parse(r.stdout || "[]") as Array<{ id: string; local_path?: string }>;
+    const found = list.find((s) => s.id === sourceId);
+    return found?.local_path ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Result of `planHostnameFoldMigration` — informs `runCodeImport` of next steps. */
+export type HostnameFoldMigration =
+  | { kind: "none"; reason: "ids-match" | "no-legacy-source" }
+  | { kind: "skipped-path-drift"; oldId: string; oldPath: string; currentPath: string }
+  | { kind: "renamed"; oldId: string; newId: string }
+  | { kind: "pending-cleanup"; oldId: string };
+
+/**
+ * Decide how to migrate from the pre-#1468 path-only-hash source id to the
+ * new hostname-fold id.
+ *
+ * Order:
+ *   1. If old == new → no-op.
+ *   2. Look up old source's local_path. Absent → no legacy source to migrate.
+ *   3. local_path != currentRoot → user moved the repo or two machines share a
+ *      hash slot. Skip migration; let the user clean up manually. We will NOT
+ *      rename or remove anything; the new source is registered alongside.
+ *   4. Otherwise: feature-check `gbrain sources rename`. If supported and the
+ *      rename call exits 0 → renamed, pages preserved.
+ *   5. Else: pending-cleanup. Caller registers + syncs new source first; only
+ *      after sync succeeds with a non-zero page count does it remove the old.
+ *      This avoids a data-loss window where the old source is gone before the
+ *      new one is verifiably populated.
+ */
+export function planHostnameFoldMigration(
+  currentRoot: string,
+  newSourceId: string,
+  legacyPathHashId: string,
+  env?: NodeJS.ProcessEnv,
+): HostnameFoldMigration {
+  if (legacyPathHashId === newSourceId) {
+    return { kind: "none", reason: "ids-match" };
+  }
+  const oldPath = sourceLocalPath(legacyPathHashId, env);
+  if (oldPath === null) {
+    return { kind: "none", reason: "no-legacy-source" };
+  }
+  if (oldPath !== currentRoot) {
+    return {
+      kind: "skipped-path-drift",
+      oldId: legacyPathHashId,
+      oldPath,
+      currentPath: currentRoot,
+    };
+  }
+  if (gbrainSupportsSourcesRename(env)) {
+    const r = spawnSync("gbrain", ["sources", "rename", legacyPathHashId, newSourceId], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: env || process.env,
+    });
+    if (r.status === 0) {
+      return { kind: "renamed", oldId: legacyPathHashId, newId: newSourceId };
+    }
+    // Rename failed at runtime — fall through to cleanup path.
+  }
+  return { kind: "pending-cleanup", oldId: legacyPathHashId };
+}
+
+/**
+ * Remove an orphaned source. Called only after new-source sync verifies pages
+ * exist, so the old source is provably redundant before deletion.
+ *
+ * Flag note: existing call sites used `--confirm-destructive` here and
+ * `--yes` in `lib/gbrain-sources.ts` — gbrain 0.35.0.0 accepts neither
+ * deterministically (the subcommand surface help is generic). We pass
+ * `--confirm-destructive` to match the existing call site convention; the
+ * flag-helper centralization in commit 4 (lib/gbrain-exec.ts) will resolve
+ * the inconsistency across the codebase.
+ */
+export function removeOrphanedSource(oldId: string): boolean {
+  const r = spawnSync("gbrain", ["sources", "remove", oldId, "--confirm-destructive"], {
+    encoding: "utf-8",
+    timeout: 30_000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return r.status === 0;
 }
 
 /**
@@ -365,7 +536,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     return skipStageForLocalStatus("code", localStatus, t0);
   }
 
-  // Step 0: Best-effort cleanup of pre-pathhash legacy source.
+  // Step 0a: Best-effort cleanup of pre-pathhash legacy source (v1.x form).
   // Earlier /sync-gbrain versions registered `gstack-code-<slug>` (no path
   // suffix). On a multi-worktree repo, those collapsed onto a single id
   // with last-sync-wins. Federated search would return stale duplicate
@@ -383,6 +554,24 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     // Treat absent-source as success (clean state). gbrain emits "not found" on
     // missing id; treat any non-zero exit without "not found" as a soft fail.
     if (rm.status === 0) legacyRemoved = true;
+  }
+
+  // Step 0b: Hostname-fold migration (#1414).
+  // Before #1468 the source id hashed only the absolute repo path. After the
+  // hostname fold, every existing user has a legacy id that no longer matches
+  // what deriveCodeSourceId produces. Try rename-in-place first (preserves
+  // pages); fall back to register-new → sync-OK → remove-old. Path-drift
+  // (user moved the repo, etc.) skips migration with a warning.
+  const pathOnlyHashLegacyId = derivePathOnlyHashLegacyId(root);
+  const migration = planHostnameFoldMigration(root, sourceId, pathOnlyHashLegacyId);
+  if (migration.kind === "skipped-path-drift" && !args.quiet) {
+    console.error(
+      `[sync:code] hostname-fold migration skipped: legacy source ${migration.oldId} `
+      + `points at ${migration.oldPath}, current repo is ${migration.currentPath}. `
+      + `Clean up manually with: gbrain sources remove ${migration.oldId} --confirm-destructive`,
+    );
+  } else if (migration.kind === "renamed" && !args.quiet) {
+    console.error(`[sync:code] hostname-fold migration: renamed ${migration.oldId} → ${migration.newId} (pages preserved)`);
   }
 
   // Step 1: Ensure source registered (idempotent). Single source of truth in lib —
@@ -439,7 +628,26 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const pageCount = sourcePageCount(sourceId);
-  const legacyNote = legacyRemoved ? `, removed legacy ${legacyId}` : "";
+
+  // Step 4: Deferred hostname-fold cleanup.
+  // Only remove the pre-#1468 path-only-hash source NOW that the new source
+  // has registered + synced + has pages. Removing before sync would create a
+  // data-loss window if sync failed; removing without a page-count check would
+  // wipe pages when sync silently no-op'd. This is the codex-review-flagged
+  // safety: register → sync → verify → THEN delete.
+  let hostnameLegacyRemoved = false;
+  if (migration.kind === "pending-cleanup" && pageCount !== null && pageCount > 0) {
+    hostnameLegacyRemoved = removeOrphanedSource(migration.oldId);
+    if (hostnameLegacyRemoved && !args.quiet) {
+      console.error(`[sync:code] hostname-fold migration: removed legacy ${migration.oldId} after new source sync verified (page_count=${pageCount})`);
+    }
+  }
+
+  const legacyParts: string[] = [];
+  if (legacyRemoved) legacyParts.push(`removed legacy ${legacyId}`);
+  if (migration.kind === "renamed") legacyParts.push(`renamed ${migration.oldId}→${migration.newId}`);
+  if (hostnameLegacyRemoved) legacyParts.push(`removed pre-hostname-fold ${migration.kind === "pending-cleanup" ? migration.oldId : ""}`);
+  const legacyNote = legacyParts.length > 0 ? `, ${legacyParts.join(", ")}` : "";
   const baseSummary = `${registered ? "registered + " : ""}synced ${sourceId} (page_count=${pageCount ?? "unknown"}${legacyNote})`;
 
   if (attach.status !== 0) {
@@ -675,8 +883,10 @@ async function main(): Promise<void> {
   process.exit(exitCode);
 }
 
-main().catch((err) => {
-  console.error(`gstack-gbrain-sync fatal: ${err instanceof Error ? err.message : String(err)}`);
-  releaseLock();
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(`gstack-gbrain-sync fatal: ${err instanceof Error ? err.message : String(err)}`);
+    releaseLock();
+    process.exit(1);
+  });
+}

@@ -20,6 +20,7 @@ import { SessionTokenStore } from './session-tokens';
 import { mintForCaller } from './auth-mint';
 import { classifyRoute, proxyToDevice, type DeviceTunnel } from './proxy';
 import { writeAudit, writeAttempt, sanitizeReplacer } from './audit';
+import { bootstrapTunnel } from './tunnel-bootstrap';
 import type { Capability } from './types';
 
 interface DaemonOptions {
@@ -395,9 +396,28 @@ async function handleTailnet(ctx: TailnetCtx): Promise<void> {
 if (import.meta.main) {
   const port = parseInt(process.env.GSTACK_IOS_DAEMON_PORT ?? '9099', 10);
   const tailnet = process.argv.includes('--tailnet');
+  const targetUDID = process.env.GSTACK_IOS_TARGET_UDID;
+  const bundleId = process.env.GSTACK_IOS_TARGET_BUNDLE_ID ?? 'com.gstack.iosqa.fixture';
+
+  // Default tunnelProvider: when GSTACK_IOS_TARGET_UDID (or a default with
+  // any connected paired device) is set, bootstrap a real CoreDevice tunnel.
+  // Otherwise return null (proxy will return 503 device_not_connected).
+  const realTunnelProvider = async () => {
+    const result = await bootstrapTunnel({
+      udid: targetUDID,
+      bundleId,
+    });
+    if (!result.ok) {
+      process.stderr.write(`bootstrap error: ${result.error}${result.detail ? ' — ' + result.detail : ''}\n`);
+      return null;
+    }
+    return result.tunnel;
+  };
+
   startDaemon({
     loopbackPort: port,
     tailnetEnabled: tailnet,
+    tunnelProvider: realTunnelProvider,
   }).then((d) => {
     if ('error' in d) {
       process.stderr.write(`daemon error: ${d.error}\n`);

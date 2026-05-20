@@ -2,6 +2,8 @@
 // Test fixture: minimal SwiftUI app + DebugBridge SPM package.
 // DebugBridgeCore (Foundation+Network) builds cross-platform.
 // DebugBridgeUI (UIKit/SwiftUI) is iOS-only.
+// DebugBridgeTouch (Objective-C) is iOS-only — in-process tap synthesis
+// derived from KIF (MIT). DEBUG-only.
 
 import PackageDescription
 
@@ -14,6 +16,7 @@ let package = Package(
     products: [
         .library(name: "DebugBridgeCore", targets: ["DebugBridgeCore"]),
         .library(name: "DebugBridgeUI", targets: ["DebugBridgeUI"]),
+        .library(name: "DebugBridgeTouch", targets: ["DebugBridgeTouch"]),
     ],
     targets: [
         .target(
@@ -25,8 +28,17 @@ let package = Package(
             ]
         ),
         .target(
+            name: "DebugBridgeTouch",
+            dependencies: [],
+            path: "Sources/DebugBridgeTouch",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("UIKit", .when(platforms: [.iOS])),
+            ]
+        ),
+        .target(
             name: "DebugBridgeUI",
-            dependencies: ["DebugBridgeCore"],
+            dependencies: ["DebugBridgeCore", "DebugBridgeTouch"],
             path: "Sources/DebugBridgeUI",
             swiftSettings: [
                 .define("DEBUG", .when(configuration: .debug)),

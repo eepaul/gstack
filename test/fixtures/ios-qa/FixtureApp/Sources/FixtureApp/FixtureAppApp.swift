@@ -23,6 +23,11 @@ struct FixtureAppApp: App {
     init() {
         #if DEBUG
         StateServer.shared.start()
+        // Wire the three UIKit-backed bridges so /screenshot, /elements,
+        // /tap, /type, /swipe actually do something on the device.
+        #if canImport(UIKit)
+        DebugBridgeUIWiring.installAll()
+        #endif
         #endif
     }
 

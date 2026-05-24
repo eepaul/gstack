@@ -4,11 +4,15 @@
  *
  * Orchestrates three storage tiers per plan §"Storage tiering":
  *
- *   1. Code (current repo)         → `gbrain sources add` (idempotent via
- *                                    lib/gbrain-sources.ts) + `gbrain sync
- *                                    --strategy code` (incremental) or
- *                                    `gbrain reindex-code --yes` (--full).
- *                                    NEVER `gbrain import` (markdown only).
+ *   1. Code + markdown (current repo) → `gbrain sources add` (idempotent
+ *                                    via lib/gbrain-sources.ts) + `gbrain
+ *                                    sync --strategy auto` (incremental;
+ *                                    walks code AND markdown in one pass).
+ *                                    --full additionally runs `gbrain
+ *                                    reindex-code --yes` after the walk
+ *                                    to force chunker-version re-embed of
+ *                                    code pages. NEVER `gbrain import`
+ *                                    (transcript pipeline).
  *   2. Transcripts + curated memory → gstack-memory-ingest (typed put_page)
  *   3. Curated artifacts to git    → gstack-brain-sync (existing pipeline)
  *
@@ -631,7 +635,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
       ran: false,
       ok: true,
       duration_ms: 0,
-      summary: `would: gbrain sources add ${sourceId} --path ${root} --federated; gbrain sync --strategy code --source ${sourceId}; gbrain sources attach ${sourceId}`,
+      summary: `would: gbrain sources add ${sourceId} --path ${root} --federated; gbrain sync --strategy auto --source ${sourceId}; gbrain sources attach ${sourceId}`,
       detail: { source_id: sourceId, source_path: root, status: "skipped" },
     };
   }
@@ -713,14 +717,15 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   // run that called reindex-code alone found nothing ("No code pages to
   // reindex"), finished in ~1s, and left the code index permanently empty
   // while still reporting OK. The page-creating walk is `sync --strategy
-  // code`, so --full must run it FIRST, then reindex-code, to honor the
-  // documented "full walk + reindex" contract for both fresh and populated
-  // sources.
+  // auto` (which walks code AND markdown — formerly `--strategy code`, now
+  // `auto` so we index repo docs too), so --full must run it FIRST, then
+  // reindex-code, to honor the documented "full walk + reindex" contract
+  // for both fresh and populated sources.
   const codeTimeoutMs = resolveStageTimeoutMs(
     process.env.GSTACK_SYNC_CODE_TIMEOUT_MS,
     "GSTACK_SYNC_CODE_TIMEOUT_MS",
   );
-  const walkResult = spawnGbrain(["sync", "--strategy", "code", "--source", sourceId], {
+  const walkResult = spawnGbrain(["sync", "--strategy", "auto", "--source", sourceId], {
     stdio: args.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "inherit", "inherit"],
     timeout: codeTimeoutMs,
     baseEnv: gbrainEnv,
@@ -732,7 +737,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
       ran: true,
       ok: false,
       duration_ms: Date.now() - t0,
-      summary: `gbrain sync --strategy code --source ${sourceId} exited ${walkResult.status}`,
+      summary: `gbrain sync --strategy auto --source ${sourceId} exited ${walkResult.status}`,
       detail: { source_id: sourceId, source_path: root, status: "failed" },
     };
   }

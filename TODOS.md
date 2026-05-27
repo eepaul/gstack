@@ -1,35 +1,66 @@
 # TODOS
 
+## design daemon: follow-ups (filed v1.45.0.0 via /ship review army)
+
+### ✅ DONE (v1.45.0.0): Tighten daemon test coverage
+
+**Resolved in commit `6b037c55` (same PR):** All 5 test gaps filled before
+landing. Per-file totals after: serve 16, daemon 34, daemon-discovery 23,
+feedback-roundtrip-daemon 4 = 77 (+10 from initial ship). Specifically:
+- Idle-shutdown actually fires (spawn-based, daemon process observed exiting,
+  state file removed).
+- Bare GET polling doesn't reset idle (hammers `/api/progress` in background,
+  daemon still idles out).
+- Idle-with-active-boards extends, then force-shuts after MAX_EXTENSIONS
+  (with `DESIGN_DAEMON_EXTENSION_MS=1500` + `MAX_EXTENSIONS=2`).
+- Concurrent `ensureDaemon()` race converges on one daemon (lock wins).
+- Stale-lock reclaim (dead PID succeeds, alive unrelated PID refuses).
+- Malformed-JSON + non-object + array-body + missing-html negatives for
+  `POST /api/boards` and `POST /boards/<id>/api/reload`.
+
+### P3: Minor maintainability nits from /ship review
+
+- `design/src/cli.ts` and `design/src/serve.ts` both have a small `openBrowser`
+  helper with identical darwin/linux/else branches. Extract a shared
+  `design/src/open-browser.ts`.
+- `design/src/daemon-client.ts:320` (`AbortSignal.timeout(2000)`) and `:357`
+  (`delay(50)`) use bare numeric literals while sibling timeouts are named
+  constants. Promote to `SHUTDOWN_POST_TIMEOUT_MS` and `ALIVE_POLL_INTERVAL_MS`.
+- `design/src/daemon-state.ts:21` `serverPath` field is written
+  (`daemon.ts:541`) but never read by production code. Either remove or
+  document the forensic intent.
+
+### P3: Daemon scope deferred from v1.45.0.0 plan
+
+Originally listed in the plan's "TODOs surfaced for later" section:
+
+- Per-daemon scoped auth tokens (only relevant once a tunnel/share use case appears).
+- Optional persistent board history on disk in
+  `~/.gstack/projects/$SLUG/designs/history/` so submitted boards survive
+  daemon restarts.
+- Windows spawn branch lifted from browse (V1 daemon is macOS + Linux;
+  Windows users fall back to legacy `--no-daemon` per-process server).
+- `$D board list` / `$D board stop <id>` per-board ops CLI (V1 has only
+  `$D daemon status` / `stop`).
+- Cross-worktree daemon attach (conductor sibling worktrees of the same
+  repo currently each spawn their own daemon — matches browse; revisit
+  if it causes friction).
+
+---
+
 ## browse server: terminal-agent teardown follow-ups (filed v1.41 via /plan-eng-review)
 
-### P3: Identity-based terminal-agent kill (replace pkill regex with PID)
+### ✅ DONE (v1.44.0.0): Identity-based terminal-agent kill (replace pkill regex with PID)
 
-**What:** Record the spawned terminal-agent PID at `browse/src/cli.ts:1057` and
-replace `pkill -f terminal-agent\.ts` at both `cli.ts:1047` and
-`server.ts:1281` (now inside the `if (ownsTerminalAgent)` gate) with
-`process.kill(pid, signal)` against the recorded PID.
-
-**Why:** `pkill -f terminal-agent\.ts` matches by command-line regex, so today
-it can kill ANY process whose argv contains `terminal-agent.ts` — sibling
-gstack sessions, editor processes that have the file open, a second gstack
-run on the same host. Latent footgun for the CLI path, not just embedders.
-
-**Pros:** Removes a real cross-session foot-cannon. PID-based kill is the
-correct identity primitive. Lets us tighten `pkill -f`'s broad-match warning
-in the new `ownsTerminalAgent` JSDoc to "historical" rather than "current".
-
-**Cons:** Requires threading the PID through the CLI-to-server state path
-(currently the parent server reads `terminal-port` to discover the agent; it
-would also need `terminal-agent-pid`). Touches `cli.ts`, `server.ts`, and
-`terminal-agent.ts` together — bigger surface than the v1.41 fix.
-
-**Context:** Surfaced by both Codex and Claude subagent during /autoplan
-review of the `ownsTerminalAgent` gate. Currently documented as out-of-scope
-in `browse/src/server.ts` JSDoc for `ServerConfig.ownsTerminalAgent`. The
-embedder fix (ownsTerminalAgent: false) means embedders don't hit this; CLI
-users still do.
-
-**Depends on:** None.
+**Resolved:** Bundled into the v1.44.0.0 long-lived-sidebar PR as Commit 0.
+`browse/src/terminal-agent-control.ts` is the new home for `readAgentRecord`,
+`writeAgentRecord`, `clearAgentRecord`, and `killAgentByRecord`. The agent
+writes `<stateDir>/terminal-agent-pid` (JSON `{pid, gen, startedAt}`) at boot
+and clears it on SIGTERM/SIGINT. `cli.ts` and `server.ts` both route through
+`killAgentByRecord` instead of `pkill -f terminal-agent\.ts`. The new
+`browse/test/terminal-agent-pid-identity.test.ts` is the static-grep tripwire
+that fails CI if `pkill ... terminal-agent` or `spawnSync('pkill', ...)`
+reappears in any source file.
 
 ---
 

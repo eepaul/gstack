@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.47.0.0] - 2026-05-28
+
+## **Stop hand-writing .gbrainignore. One command scans your repo and writes one.**
+
+gbrain v0.40.9.0+ lets you drop a `.gbrainignore` at the repo root to tell the brain what to skip when indexing — same gitignore syntax. Writing one by hand for a real project takes ~30 minutes of trial and error: copy entries from `.gitignore`, scan for big data directories, decide which extensions to exclude, sort out which config files to `!rescue`. The new `/gbrain-init-ignore` skill does all of that in five interactive prompts.
+
+It detects your project type (Python / Node / Rust / Go / Ruby / Java / mixed) from root-level signals (`pyproject.toml`, `package.json`, etc.), reuses the meaningful entries from `.gitignore` (filtering out the dotdirs and `node_modules/` that gbrain already auto-prunes), runs `du -sh */` to surface directories above 50MB for confirmation, and lists the top-20 file extensions so you can check off which ones to exclude. Important config files get auto-rescued based on the detected type — `!pyproject.toml`, `!package.json`, `!tsconfig.json`, etc. — so checking "exclude `*.json`" never accidentally drops your project config.
+
+### The .gbrainignore numbers that matter
+
+Measured against the user's hand-written `.gbrainignore` on a real Python repo (polymarket-mm-trading-ai: 23GB `runs/`, 1.4GB `logs/`, 627MB `infra/`). Reproduce with:
+
+```bash
+bun run bin/gstack-gbrainignore-gen.ts --build --project-types python \
+  --gitignore .gitignore \
+  --big-dirs '[{"name":"runs/","size":"23G"},{"name":"logs/","size":"1.4G"},{"name":"infra/","size":"627M"}]' \
+  --exclude-ext '["json","yaml","html","parquet","jsonl","csv"]'
+```
+
+| Metric | Hand-written | `/gbrain-init-ignore` | Δ |
+|---|---|---|---|
+| Time to authored file | ~30 min | ~1 min | **30× faster** |
+| Lines | 140 | 88 | tighter, same coverage |
+| Sections with rationale | 0 | 6 | every block annotated |
+| Dry-run sync impact preview | none | shows skip/keep count | new |
+| Cross-section dedupe (no duplicated `dist/` etc.) | manual | automatic | new |
+
+The generated file is shorter because it dedupes across sections — entries already covered by `.gitignore` don't get re-emitted in the project-type template. The hand-written 140-line version has substantial repetition that's harmless but noisy.
+
+### What this means for you
+
+If you've added a code repo to gbrain and noticed it's indexing `data/`, `runs/`, big JSON files, or other things that pollute search, run `/gbrain-init-ignore` from the repo root. Five prompts later you have a tuned `.gbrainignore` plus a backup of the prior one if you had it. Run `/sync-gbrain` next and the new policy takes effect.
+
+### Itemized changes
+
+#### Added
+
+- **New skill `/gbrain-init-ignore`** (`gbrain-init-ignore/SKILL.md.tmpl`, ~290 lines). Nine-step interactive flow: pre-flight (git repo + gbrain >= 0.40.9), project-type detection, `.gitignore` adoption + filtering, big-directory scan with confirmation, extension-level exclusion with auto-rescue, content composition, optional dry-run sync impact, atomic write with backup, verdict block. Modes: `--dry-run`, `--force`, `--no-extensions`, `--preset <type>`, `--from-gitignore`.
+- **New utility `bin/gstack-gbrainignore-gen.ts`** (~470 lines). Pure functions (`detectProjectType`, `filterGitignoreForBrain`, `getTypeTemplate`, `getRescueListForTypes`, `buildIgnoreContent`) + scan helpers (`scanBigDirs` via `du -sh`, `scanExtensions` via `find` + `uniq -c`). CLI subcommands: `--detect-types`, `--scan-big-dirs`, `--scan-extensions`, `--build`.
+- **New test file `test/gstack-gbrainignore-gen.test.ts`** (54 cases). Covers project-type detection (single + multi + alphabetical + dedupe), gitignore filtering (drops auto-pruned dirs, keeps build artifacts, dedupes), type templates + rescues, full `buildIgnoreContent` composition (section ordering, headers, dedupe across sections, deterministic output), and CLI integration (real `find` + `du` against tmp dirs).
+- Skill registered in `AGENTS.md` (Operational + memory table) and `docs/skills.md` (Multi-AI block alongside `/setup-gbrain` and `/sync-gbrain`).
+
+#### For contributors
+
+- Heuristic logic lives in gstack, not gbrain upstream. Decision documented in the skill's preamble: keeps iteration cycles fast (no upstream PR loop), and the output format is gbrain-stable (gitignore syntax via the `ignore` lib).
+- The `-name '.?*'` find pattern in `scanExtensions` is load-bearing — plain `-name '.*'` matches `.` (cwd) and prunes the entire traversal. Test `CLI: --scan-extensions > counts file extensions, top-N descending` catches a regression here.
+- Cross-section dedupe in `buildIgnoreContent` prevents the project-type template from re-emitting entries already in the `.gitignore`-adopted block. Output is shorter and visually cleaner — same gitignore semantics either way.
+
 ## [1.46.0.0] - 2026-05-26
 
 ## **gstack v2 foundation lands. Catalog tokens drop 56%, eval-first floor covers all 51 skills, hard token + dollar caps gate every PR.**

@@ -65,6 +65,7 @@ Invoke them by name (e.g., `/office-hours`).
 | `/cso` | OWASP Top 10 + STRIDE security audit. |
 | `/setup-gbrain` | Set up gbrain for cross-machine session memory sync. |
 | `/sync-gbrain` | Keep gbrain current with this repo's code; refresh agent search guidance in CLAUDE.md. |
+| `/gbrain-init-ignore` | Scaffold a `.gbrainignore` for this repo. Detects project type, reuses `.gitignore`, scans big dirs, asks which extensions to exclude. Replaces 30 minutes of hand-tuning with five prompts. |
 
 ### Browser + agent integration
 

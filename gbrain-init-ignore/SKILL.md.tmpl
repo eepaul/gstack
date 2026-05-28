@@ -1,0 +1,400 @@
+---
+name: gbrain-init-ignore
+preamble-tier: 2
+version: 1.0.0
+description: |
+  Scaffold a .gbrainignore file for the current repo. Detects project type
+  (Python / Node / Rust / Go / Ruby / Java / mixed), reuses meaningful
+  entries from .gitignore, scans for big data dirs (>50MB), and asks which
+  file extensions to exclude. Replaces the 30-minute hand-write with a
+  1-minute interactive flow. Use when asked to "set up gbrainignore",
+  "generate .gbrainignore", "init gbrainignore", or "stop gbrain from
+  indexing data dirs". (gstack)
+triggers:
+  - init gbrainignore
+  - generate gbrainignore
+  - scaffold gbrainignore
+  - setup gbrainignore
+  - stop indexing data
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - AskUserQuestion
+---
+
+{{PREAMBLE}}
+
+# /gbrain-init-ignore — Scaffold a .gbrainignore
+
+You are running the "set up gbrain's per-repo exclude policy" verb. gbrain's
+`.gbrainignore` (v0.40.9.0+) is the equivalent of `.gitignore` for what the
+brain indexes. Hand-writing it for a real repo takes ~30 minutes of trial-
+and-error; this skill does it in ~1 minute via 5 AskUserQuestion prompts.
+
+**Scope:** writes a single `.gbrainignore` at the cwd repo root. Does NOT
+touch `/sync-gbrain`, `/setup-gbrain`, source registration, or the brain
+itself. Does NOT modify `.gitignore`.
+
+**Architecture:** the heuristic logic lives in `{{BIN_DIR}}/gstack-gbrainignore-gen.ts`
+(pure functions + a few `du`/`find` shells). This skill is the interactive
+orchestrator: it shells out for scans, surfaces choices via
+AskUserQuestion, then drives the final write.
+
+## User-invocable
+
+When the user types `/gbrain-init-ignore`, run this skill. Argument modes
+(parsed by the skill itself, not a dispatcher binary):
+
+- `/gbrain-init-ignore` — full interactive flow (default)
+- `/gbrain-init-ignore --dry-run` — preview only; never write the file
+- `/gbrain-init-ignore --force` — overwrite an existing `.gbrainignore`
+  (with auto-backup to `.gbrainignore.bak-<timestamp>`)
+- `/gbrain-init-ignore --no-extensions` — skip the extension-exclusion
+  prompt entirely
+- `/gbrain-init-ignore --preset <name>` — bypass project-type auto-detection.
+  Valid names: `python`, `node`, `rust`, `go`, `ruby`, `java`, `generic`,
+  or comma-separated combos like `python,node`.
+- `/gbrain-init-ignore --from-gitignore` — minimal mode: only reuse
+  `.gitignore` entries, skip type templates and extension prompts.
+
+---
+
+## Step 1: Pre-flight
+
+Three preconditions must hold. If any fails, STOP with a clear message —
+do NOT write a half-baked file.
+
+```bash
+# 1a. Must be in a git repo
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "BLOCKED: /gbrain-init-ignore must be run from inside a git repo."
+  echo "  Current dir: $(pwd)"
+  exit 2
+}
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# 1b. gbrain CLI must exist + be >= 0.40.9 (the version that introduced .gbrainignore)
+if ! command -v gbrain >/dev/null 2>&1; then
+  echo "BLOCKED: gbrain CLI not found on PATH."
+  echo "  Fix: run /setup-gbrain first."
+  exit 2
+fi
+GBRAIN_VER="$(gbrain --version 2>/dev/null | head -1 | awk '{print $2}')"
+# Numeric compare via sort -V; fail if version < 0.40.9
+MIN_VER="0.40.9"
+if [ "$(printf '%s\n%s\n' "$MIN_VER" "$GBRAIN_VER" | sort -V | head -1)" != "$MIN_VER" ]; then
+  echo "BLOCKED: gbrain $GBRAIN_VER is older than the $MIN_VER minimum (.gbrainignore support)."
+  echo "  Fix: run /gstack-upgrade to bump gbrain."
+  exit 2
+fi
+```
+
+If `.gbrainignore` already exists AND the user did NOT pass `--force`, use
+AskUserQuestion to decide. ELI10 the choice clearly — overwriting throws
+away the user's prior hand-tuning.
+
+> D# — `.gbrainignore` already exists at `<repo_root>/.gbrainignore`.
+>   How should we proceed?
+> ELI10: this file controls what gbrain skips when indexing this repo.
+> You already have one. We can rewrite it from scratch (with a backup),
+> append to it, or bail.
+> Stakes: "Overwrite" replaces your prior tuning. We auto-backup to
+>   `.gbrainignore.bak-<timestamp>` so you can `cp` it back, but that's a
+>   one-extra-step recovery, not a zero-cost undo.
+> Recommendation: C (Cancel) — when in doubt, read the current file first,
+>   then re-run with --force if you decide to regenerate.
+> A) Overwrite (with auto-backup) — fresh generation from current repo state
+> B) Append a divider + suggested new patterns at the end of the existing file
+>    (no removal of existing content; you decide what to keep after)
+> C) Cancel — leave the existing file alone
+
+If A → proceed; record `OVERWRITE=1`.
+If B → proceed; record `APPEND=1` (Step 8 will use a different write strategy).
+If C → STOP with `DONE_WITH_CONCERNS: existing .gbrainignore preserved at user request`.
+
+---
+
+## Step 2: Project type detection
+
+```bash
+TYPES_JSON="$(bun run {{BIN_DIR}}/gstack-gbrainignore-gen.ts \
+  --detect-types --root "$REPO_ROOT" --json)"
+PROJECT_TYPES="$(echo "$TYPES_JSON" | jq -r '.project_types | join(",")')"
+```
+
+If the user passed `--preset`, override `PROJECT_TYPES` with the preset value
+(comma-separated). Skip the AskUserQuestion below.
+
+Otherwise, report the detection and confirm:
+
+> Detected project type(s): **python, node**
+>   (from: pyproject.toml + package.json at repo root)
+
+If `PROJECT_TYPES == "generic"` AND no `--preset`, AskUserQuestion the user
+which preset to apply (their repo has no standard signals, so the type
+templates section will be empty unless they pick one).
+
+> D# — No standard project signals found at the repo root.
+>   Pick a preset to apply, or stick with generic.
+> ELI10: project-type presets add common build/cache exclusions
+>   (e.g. python adds `__pycache__/`, node adds `dist/`). With "generic"
+>   the file only has the common-runtime block and whatever you tell it
+>   in later steps.
+> Recommendation: G (Generic) when truly mixed/unknown; otherwise pick
+>   the closest match.
+> A) python
+> B) node
+> C) rust
+> D) go
+> E) ruby
+> F) java
+> G) generic (recommended for truly mixed/unknown repos)
+
+---
+
+## Step 3: Reuse from `.gitignore`
+
+Pass the path; the generator filters out noise (`.git/`, `node_modules/`,
+`.idea/`, etc. — gbrain auto-prunes those) and keeps the meaningful entries
+(`dist/`, `__pycache__/`, `*.egg-info/`, `*.log`, ...).
+
+```bash
+GITIGNORE_PATH="$REPO_ROOT/.gitignore"
+GITIGNORE_FLAG=""
+if [ -f "$GITIGNORE_PATH" ]; then
+  GITIGNORE_FLAG="--gitignore $GITIGNORE_PATH"
+fi
+```
+
+If the user passed `--from-gitignore`, this is the only signal step — skip
+Step 4 and Step 5.
+
+---
+
+## Step 4: Big-directory scan + confirmation
+
+```bash
+BIG_DIRS_JSON="$(bun run {{BIN_DIR}}/gstack-gbrainignore-gen.ts \
+  --scan-big-dirs --root "$REPO_ROOT" --min-mb 50 --json)"
+```
+
+If `.big_dirs` is empty, skip the prompt and record `BIG_DIRS_JSON='[]'`.
+
+Otherwise, AskUserQuestion with `multiple: true` listing each big dir as a
+checkbox:
+
+> D# — These top-level dirs are over 50MB. Exclude them from gbrain?
+> ELI10: gbrain indexes file contents for semantic search. Big data dirs
+>   like `data/`, `runs/`, `chrome_profile/` are almost never useful for
+>   search and they 10-50× the embedding cost.
+> Recommendation: check anything that looks like data, recordings,
+>   downloads, or generated artifacts. Leave source-code or doc dirs
+>   unchecked.
+> A) data/ (1.2G)
+> B) runs/ (23G)
+> C) chrome_profile/ (450M)
+> D) artifacts/ (8.4G)
+> ...
+
+Build the user-confirmed list as a JSON array of {name, size}:
+
+```bash
+# Pseudo-code — depends on which checkboxes the user ticked.
+# Result: BIG_DIRS_CONFIRMED='[{"name":"runs/","size":"23G"},...]'
+```
+
+---
+
+## Step 5: Extension-level exclusions
+
+Skip this entirely if the user passed `--no-extensions` or `--from-gitignore`.
+
+```bash
+EXTS_JSON="$(bun run {{BIN_DIR}}/gstack-gbrainignore-gen.ts \
+  --scan-extensions --root "$REPO_ROOT" --top 20 --json)"
+```
+
+Show the user the distribution and ask which extensions to exclude. gbrain's
+`auto` strategy treats most code-like extensions as source — for data-heavy
+extensions (`.json`, `.yaml`, `.html`, `.parquet`, etc.) you usually want to
+exclude them.
+
+> D# — File extension distribution (top 20). Which should we exclude?
+> ELI10: gbrain's `auto` strategy treats these all as code. For data
+>   formats (.json/.yaml/.html), that pollutes search with config and
+>   data noise. Excluding them is the most common 5-minute win.
+>   We auto-`!rescue` important config files (pyproject.toml, package.json,
+>   tsconfig.json, *.config.js, ...) based on your project type, so checking
+>   `*.json` won't lose those.
+> Recommendation: check data-heavy extensions (.json, .yaml, .csv, .html,
+>   .parquet, .jsonl). Leave actual source extensions (.py, .ts, .rs) unchecked.
+> A) .py (3,247 files)
+> B) .md (412 files)
+> C) .json (1,247 files)
+> D) .yaml (380 files)
+> E) .html (892 files)
+> F) .csv (45 files)
+> G) .parquet (892 files)
+> H) .jsonl (1,089 files)
+> ...
+
+Result: `EXCLUDE_EXTS_JSON='["json","yaml","html","csv"]'`.
+
+---
+
+## Step 6: Build the .gbrainignore content
+
+One call to the generator with all collected inputs. Output goes to a
+shell variable; nothing is written yet.
+
+```bash
+GENERATED="$(bun run {{BIN_DIR}}/gstack-gbrainignore-gen.ts \
+  --build \
+  --project-types "$PROJECT_TYPES" \
+  $GITIGNORE_FLAG \
+  --big-dirs "$BIG_DIRS_CONFIRMED" \
+  --exclude-ext "$EXCLUDE_EXTS_JSON" \
+  --timestamp "$(date -u +%Y-%m-%d)")"
+
+# Sanity check
+echo "$GENERATED" | head -20
+LINES="$(echo "$GENERATED" | wc -l)"
+echo ""
+echo "Generated $LINES lines."
+```
+
+Show the user the first 20 lines + total line count. This is the
+"confirmation moment" before any write.
+
+---
+
+## Step 7: Optional dry-run sync verification
+
+If this repo is registered as a gbrain source, run a dry-run to estimate the
+impact:
+
+```bash
+SOURCE_ID="$(gbrain sources list --json 2>/dev/null \
+  | jq -r --arg p "$REPO_ROOT" '.sources[] | select(.local_path==$p) | .id' \
+  | head -1)"
+
+if [ -n "$SOURCE_ID" ] && [ "$SOURCE_ID" != "null" ]; then
+  # Stage the generated file in a temp spot so the dry-run reads it
+  TMP_IGNORE="$REPO_ROOT/.gbrainignore.preview-$$"
+  printf '%s' "$GENERATED" > "$TMP_IGNORE"
+  # Swap with existing if any
+  if [ -f "$REPO_ROOT/.gbrainignore" ]; then
+    mv "$REPO_ROOT/.gbrainignore" "$REPO_ROOT/.gbrainignore.tmp-bak-$$"
+  fi
+  mv "$TMP_IGNORE" "$REPO_ROOT/.gbrainignore"
+
+  echo "Dry-run sync impact (source=$SOURCE_ID):"
+  gbrain sync --source "$SOURCE_ID" --strategy auto --dry-run --no-pull 2>&1 | tail -20
+
+  # Restore so we don't pollute the working tree
+  rm "$REPO_ROOT/.gbrainignore"
+  if [ -f "$REPO_ROOT/.gbrainignore.tmp-bak-$$" ]; then
+    mv "$REPO_ROOT/.gbrainignore.tmp-bak-$$" "$REPO_ROOT/.gbrainignore"
+  fi
+else
+  echo "Note: this repo isn't registered as a gbrain source yet."
+  echo "  Run /sync-gbrain or:"
+  echo "    gbrain sources add <id> --path . --strategy auto"
+  echo "  Then re-run gbrain sync to apply the new policy."
+fi
+```
+
+**Best-effort:** if any step in the dry-run fails (network, broken source,
+etc.), DO NOT abort the whole skill — just print a warning and continue to
+Step 8. The dry-run is informational, not gating.
+
+---
+
+## Step 8: Write the file
+
+`--dry-run` mode stops here: print the full content to stdout and exit
+with `DONE: dry-run only; no file written`.
+
+Otherwise, write atomically:
+
+```bash
+# Backup if overwriting (Step 1 set OVERWRITE=1)
+if [ -f "$REPO_ROOT/.gbrainignore" ] && [ "${OVERWRITE:-0}" = "1" ]; then
+  BAK_PATH="$REPO_ROOT/.gbrainignore.bak-$(date +%Y%m%d-%H%M%S)"
+  cp "$REPO_ROOT/.gbrainignore" "$BAK_PATH"
+  echo "Backed up existing .gbrainignore to $BAK_PATH"
+fi
+
+# Append mode (Step 1 set APPEND=1): glue suggested content after a divider
+if [ "${APPEND:-0}" = "1" ] && [ -f "$REPO_ROOT/.gbrainignore" ]; then
+  {
+    cat "$REPO_ROOT/.gbrainignore"
+    echo ""
+    echo "# ── Appended by /gbrain-init-ignore on $(date -u +%Y-%m-%d) ──"
+    echo "$GENERATED" | sed '/^# .gbrainignore — generated/d; /^# gbrain auto-prunes/d; /^# /d; /^$/d' | head -100
+  } > "$REPO_ROOT/.gbrainignore.tmp-$$"
+else
+  # Overwrite mode (default)
+  printf '%s' "$GENERATED" > "$REPO_ROOT/.gbrainignore.tmp-$$"
+fi
+
+# Atomic rename
+mv "$REPO_ROOT/.gbrainignore.tmp-$$" "$REPO_ROOT/.gbrainignore"
+echo "Wrote $REPO_ROOT/.gbrainignore"
+```
+
+---
+
+## Step 9: Verdict
+
+Print a status block matching `/sync-gbrain` Step 5 conventions. Each row
+is `[OK]/[FIX]/[WARN]/[ERR]`. Tally the wins and the next action.
+
+```
+gbrain-init-ignore: GREEN
+
+  CLI version .... OK   gbrain $GBRAIN_VER (>= 0.40.9 required)
+  Project type ... OK   $PROJECT_TYPES (detected from <signals>)
+  .gitignore ..... OK   <N> patterns adopted, <M> filtered as gbrain-auto-pruned noise
+  Big dirs ....... OK   <N> dirs >50MB excluded (<list>) | "no large dirs found"
+  Extensions ..... OK   <N> excluded with <M> rescues | "skipped" (--no-extensions)
+  Sync impact .... OK   estimated <X> → <Y> files (saves ~<P>% embed cost) | "source not registered"
+  File written ... OK   .gbrainignore ($LINES lines) | "dry-run only — no file written"
+  Backup ......... OK   .gbrainignore.bak-<ts> | "n/a (first creation)"
+
+Next steps:
+  /sync-gbrain                        # apply the new policy on the next sync
+  cat .gbrainignore                   # review what we wrote
+  /gbrain-init-ignore --dry-run       # re-run preview without writing
+```
+
+If any row is YELLOW or RED, the verdict line says so and the failing row
+surfaces a one-line "next action". For example:
+- `Sync impact .... ERR  dry-run failed: <error>; .gbrainignore still written, re-run /sync-gbrain to verify`
+
+---
+
+## Concurrency note
+
+This skill is safe to run from multiple terminals on the same repo, but if
+two run concurrently against the same `.gbrainignore` the last-writer wins.
+We don't take a lock because the operation is short (<5s of skill time
+excluding user prompts) and the failure mode is recoverable (`.gbrainignore.bak-*`
+files are deterministic by timestamp).
+
+## Status reporting
+
+End with a Completion Status (per the preamble protocol):
+
+- **DONE** — file written, all rows OK or informational.
+- **DONE_WITH_CONCERNS** — written but at least one row WARN. Common causes:
+  source not registered (no dry-run impact estimate), append mode produced a
+  visually noisy file the user may want to clean up manually.
+- **BLOCKED** — pre-flight failed (no git repo, gbrain not installed, gbrain
+  version too old) OR user picked "Cancel" at the existing-file prompt.
+- **NEEDS_CONTEXT** — `--preset generic` was forced AND `.gitignore` is
+  empty/missing — the generated file will be very thin and the user may
+  want to add more by hand.

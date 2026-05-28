@@ -44,6 +44,7 @@ Detailed guides for every gstack skill — philosophy, workflow, and examples.
 | [`/pair-agent`](#pair-agent) | **Remote Agent Bridge** | Pair a remote AI agent (OpenClaw, Codex, Cursor, Hermes) with your browser. Scoped tunnel, locked allowlist, session token. |
 | [`/setup-gbrain`](#setup-gbrain) | **Memory Sync** | Set up gbrain for cross-machine session memory sync. One command from zero to live. |
 | [`/sync-gbrain`](#sync-gbrain) | **Keep Brain Current** | Refresh gbrain against this repo's code; teach the agent when to use `gbrain search`/`code-def` over Grep. Idempotent; safe to re-run. |
+| [`/gbrain-init-ignore`](#gbrain-init-ignore) | **Scaffold .gbrainignore** | Scaffold a `.gbrainignore` for this repo. Detects project type, reuses `.gitignore`, scans big dirs (>50MB), asks which extensions to exclude. Replaces 30 minutes of hand-tuning with five prompts. |
 | | | |
 | **Safety & Utility** | | |
 | [`/careful`](#safety--guardrails) | **Safety Guardrails** | Warns before destructive commands (rm -rf, DROP TABLE, force-push, git reset --hard). Override any warning. Common build cleanups whitelisted. |

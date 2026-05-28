@@ -1446,7 +1446,7 @@ GBrain is set up and synced on this machine. The agent should prefer gbrain
 over Grep when the question is semantic or when you don't know the exact
 identifier yet. Two indexed corpora available via the `gbrain` CLI:
 - This repo's code (registered as `gstack-code-<repo>` source).
-- `~/.gstack/` curated memory (registered as `gstack-brain-<user>` source via
+- `~/.gstack/` curated memory (registered as `gstack-artifacts-<user>` source via
   the existing federation pipeline).
 
 Prefer gbrain when:
@@ -1457,7 +1457,7 @@ Prefer gbrain when:
 - "What calls Y?" / "What does Y depend on?":
     `gbrain code-callers <symbol>` / `gbrain code-callees <symbol>`
 - "What did we decide last time?" / past plans, retros, learnings:
-    `gbrain search "<terms>" --source gstack-brain-<user>`
+    `gbrain search "<terms>" --source gstack-artifacts-<user>`
 
 Grep is still right for known exact strings, regex, multiline patterns, and
 file globs. The brain auto-syncs incrementally on every gstack skill start.

@@ -882,8 +882,11 @@ no `--source` flag needed. Conductor sibling worktrees of the same repo
 each have their own pin and their own indexed pages, so semantic results
 match the actual code on disk in this worktree.
 
-Two indexed corpora available via the `gbrain` CLI:
-- This worktree's code (auto-pinned via `.gbrain-source`).
+Two indexed corpora available via the `gbrain` CLI. Both include the full
+worktree contents — source code AND markdown (docs/, READMEs, CHANGELOG,
+design notes, SKILL.md files, etc.) — so semantic search hits docs and code
+together:
+- This worktree's code + docs (auto-pinned via `.gbrain-source`).
 - `~/.gstack/` curated memory (registered as `gstack-artifacts-<user>` source via
   the existing federation pipeline).
 
@@ -894,6 +897,8 @@ Prefer gbrain when:
     `gbrain code-def <symbol>` or `gbrain code-refs <symbol>`
 - "What calls Y?" / "What does Y depend on?":
     `gbrain code-callers <symbol>` / `gbrain code-callees <symbol>`
+- "What do the docs / design notes / READMEs say about X?" / how a feature works conceptually:
+    `gbrain search "<terms>"` or `gbrain query "<question>"`
 - "What did we decide last time?" / past plans, retros, learnings:
     `gbrain search "<terms>" --source gstack-artifacts-<user>`
 

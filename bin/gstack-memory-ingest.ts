@@ -1253,12 +1253,61 @@ function isRemoteHttpMcpMode(): boolean {
 }
 
 /**
+ * Path-safety guard for cleanupStagingDir (incident 2026-05-28).
+ *
+ * Returns true iff `dir` is one of the two staging-dir shapes this module
+ * owns: $GSTACK_HOME/.staging-ingest-<pid>-<ts> (makeStagingDir) or
+ * $GSTACK_HOME/transcripts/run-<pid>-<ts> (makePersistentTranscriptDir).
+ *
+ * Pattern-matching the basename (not just $GSTACK_HOME prefix) is the
+ * load-bearing check — even if a corrupt gbrain checkpoint puts an
+ * arbitrary path under $GSTACK_HOME, the basename pid-ts shape blocks
+ * any user-named repo dir from being treated as legal staging.
+ *
+ * Background: in incident 2026-05-28, ~/.gbrain/import-checkpoint.json
+ * was written with dir = a project repo path (/home/.../polymarket-copy-trading,
+ * the user's cwd at the time of an earlier sync). decideResume read that,
+ * fed it as GSTACK_INGEST_RESUME_DIR, the ingest then failed (2 YAML errors),
+ * and the finally block called cleanupStagingDir(dir) which rm -rf'd the
+ * entire repo. Twice. This guard is the LAST LINE OF DEFENSE — orchestrator-
+ * side guard (decideResume) also added, but cleanup must refuse independently
+ * in case any other caller ever passes a bad path.
+ */
+function isLegalStagingPath(dir: string): boolean {
+  if (!dir || typeof dir !== "string") return false;
+  const normDir = dir.replace(/\/+$/, "");
+  const normHome = GSTACK_HOME.replace(/\/+$/, "");
+  const homePrefix = normHome + "/";
+  if (!normDir.startsWith(homePrefix)) return false;
+  if (normDir === normHome) return false;
+  const tail = normDir.slice(homePrefix.length);
+  // ~/.gstack/.staging-ingest-<pid>-<ts>
+  if (/^\.staging-ingest-\d+-\d+$/.test(tail)) return true;
+  // ~/.gstack/transcripts/run-<pid>-<ts>
+  if (/^transcripts\/run-\d+-\d+$/.test(tail)) return true;
+  return false;
+}
+
+/**
  * Best-effort recursive cleanup. Failures swallowed — at worst we leak a
  * staging dir to disk; the next run uses a new one and they age out via
  * normal disk hygiene. We deliberately do NOT crash the pipeline on
  * cleanup failure.
+ *
+ * SAFETY (incident 2026-05-28): refuses to rmSync any path that doesn't
+ * match the staging-dir shape this module produces. See isLegalStagingPath.
  */
 function cleanupStagingDir(dir: string): void {
+  if (!isLegalStagingPath(dir)) {
+    console.error(
+      `[memory-ingest] REFUSED cleanupStagingDir("${dir}") — not a legal ` +
+        `staging path under ${GSTACK_HOME} (expected basename: ` +
+        `.staging-ingest-<pid>-<ts> or transcripts/run-<pid>-<ts>). ` +
+        `Likely a corrupt gbrain checkpoint or staging-dir derivation bug. ` +
+        `Path preserved (was NOT removed). See incident 2026-05-28.`,
+    );
+    return;
+  }
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch {

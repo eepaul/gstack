@@ -164,16 +164,62 @@ export type ResumeVerdict =
   | { kind: "stale-staging-missing"; stagingDir: string };
 
 /**
+ * Path-safety guard for decideResume (incident 2026-05-28).
+ *
+ * Mirrors isLegalStagingPath in gstack-memory-ingest.ts — both files must
+ * agree on what a staging dir looks like, since this orchestrator passes
+ * the resume dir to the child via GSTACK_INGEST_RESUME_DIR and the child's
+ * cleanupStagingDir is the one that ultimately rmSync's it.
+ *
+ * Legal shapes:
+ *   $GSTACK_HOME/.staging-ingest-<pid>-<ts>     (gstack-memory-ingest makeStagingDir)
+ *   $GSTACK_HOME/transcripts/run-<pid>-<ts>     (makePersistentTranscriptDir)
+ *
+ * If checkpoint.dir doesn't match, treat the checkpoint as stale instead
+ * of feeding the bad path downstream. The 2026-05-28 incident: gbrain
+ * wrote checkpoint.dir = a project repo path; decideResume passed it
+ * through; the child's failed-ingest finally block rm -rf'd the repo.
+ */
+function isLegalStagingPath(dir: string): boolean {
+  if (!dir || typeof dir !== "string") return false;
+  const normDir = dir.replace(/\/+$/, "");
+  const normHome = GSTACK_HOME.replace(/\/+$/, "");
+  const homePrefix = normHome + "/";
+  if (!normDir.startsWith(homePrefix)) return false;
+  if (normDir === normHome) return false;
+  const tail = normDir.slice(homePrefix.length);
+  if (/^\.staging-ingest-\d+-\d+$/.test(tail)) return true;
+  if (/^transcripts\/run-\d+-\d+$/.test(tail)) return true;
+  return false;
+}
+
+/**
  * Decide whether the next memory-ingest run should resume from gbrain's
  * checkpoint or restage from scratch.
  *   - no checkpoint              → run a fresh ingest pass
  *   - checkpoint + staging ok    → resume (gbrain picks up at processedIndex+1)
  *   - checkpoint + staging gone  → warn, fall through to fresh restage
+ *   - checkpoint.dir not a legal staging path → REFUSE, treat as stale (D-2026-05-28)
  */
 export function decideResume(): ResumeVerdict {
   const cp = readGbrainCheckpoint();
   if (!cp || !cp.dir) return { kind: "no-checkpoint" };
   const stagingDir = cp.dir;
+  // SAFETY (incident 2026-05-28): refuse to resume from a checkpoint whose
+  // dir is not a legal staging path. Without this, a corrupt checkpoint
+  // pointing at e.g. the user's cwd / project repo would be passed downstream
+  // as GSTACK_INGEST_RESUME_DIR and the ingest child's cleanup would rm -rf it.
+  if (!isLegalStagingPath(stagingDir)) {
+    console.error(
+      `[sync:memory] REFUSING to resume from gbrain checkpoint — dir ` +
+        `"${stagingDir}" is not a legal staging path under ${GSTACK_HOME} ` +
+        `(expected .staging-ingest-<pid>-<ts> or transcripts/run-<pid>-<ts>). ` +
+        `Treating as stale; will restage from scratch. ` +
+        `Inspect ~/.gbrain/import-checkpoint.json — likely corrupt. ` +
+        `See incident 2026-05-28.`,
+    );
+    return { kind: "stale-staging-missing", stagingDir };
+  }
   if (!existsSync(stagingDir)) {
     return { kind: "stale-staging-missing", stagingDir };
   }

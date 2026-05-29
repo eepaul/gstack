@@ -1474,6 +1474,16 @@ Prefer gbrain when:
 - "What did we decide last time?" / past plans, retros, learnings:
     `gbrain search "<terms>" --source gstack-artifacts-<user>`
 
+**Searching other projects' sources** (cross-source / federated search):
+Other repos synced via `/sync-gbrain` on this machine are also indexed as
+federated sources. By default `gbrain search` / `gbrain query` only hits the
+current worktree's pinned source. To search a different project:
+1. `gbrain sources list` — find the source id. Output shows `id  …  local_path`,
+   so match the project's path to its id (auto-registered ids look like
+   `gstack-code-<hash>`; manually-registered ids can be any friendly name).
+2. `gbrain search "<terms>" --source <id>` — scope to that source.
+3. `gbrain search "<terms>" --source __all__` — search across every source at once.
+
 Grep is still right for known exact strings, regex, multiline patterns, and
 file globs. Run `/sync-gbrain` after meaningful code changes; for ongoing
 auto-sync across all worktrees, run `gbrain autopilot --install` once per
